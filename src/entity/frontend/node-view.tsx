@@ -151,12 +151,18 @@ const SpreadsheetGrid: FC<{ slug: string; caption?: string }> = ({ slug, caption
   return createElement(
     'div',
     { className: 'c4s-spreadsheet', 'data-slug': slug },
-    caption ? createElement('div', { className: 'c4s-spreadsheet__caption' }, caption) : null,
-    createElement(
-      'div',
-      { className: 'c4s-spreadsheet__meta' },
-      `${nRows}×${nCols}${headerRow ? ' · header row' : ''}${headerCol ? ' · header col' : ''}`,
-    ),
+    // Per-reference caption (a short human description of the sheet), rendered
+    // above the grid through the SAME inline-markdown path as cells. Empty /
+    // absent caption ⇒ no caption element (no fallback to dimensions). Sheet
+    // dimensions and header flags stay in the overview/detail projection (the
+    // agent-facing contract) and are NOT surfaced as reader-facing chrome here.
+    caption
+      ? createElement(
+          'div',
+          { className: 'c4s-spreadsheet__caption' },
+          ...renderInlineMarkdown(caption, 'caption'),
+        )
+      : null,
     createElement('div', { className: 'c4s-spreadsheet__scroll' }, table),
     controls,
   );

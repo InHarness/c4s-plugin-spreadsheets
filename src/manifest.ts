@@ -21,7 +21,7 @@ import { spreadsheetEntity } from './entity';
 export const manifest: PluginManifest = {
   // KEEP in sync with package.json "name".
   name: 'c4s-plugin-spreadsheets',
-  version: '0.0.3',
+  version: '0.0.5',
   // Host API range. Host 1.0.0 must satisfy this.
   hostApiVersion: '^1.0.0',
   engines: { node: '>=20' },
