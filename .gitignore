@@ -23,3 +23,6 @@ implementer/
 
 # shared skill symlink -> claude4spec-private/skills/brief-implementer-plugin (local-only)
 .claude/skills/c4s-brief-implementer
+
+# shared skill symlink -> claude4spec-private/env-runner/skills/c4s-env-runner (local-only)
+.claude/skills/c4s-env-runner
