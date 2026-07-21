@@ -1,0 +1,25 @@
+# claude4spec (auto-added)
+.claude4spec/mcp.json
+*.deprecated
+# /claude4spec (auto-added)
+
+# scaffold (c4s-plugin-scaffold)
+node_modules
+
+# build output / OS cruft
+dist/
+*.tsbuildinfo
+.DS_Store
+
+# per-brief git worktrees (see .claude/skills/c4s-brief-implementer)
+.worktrees/
+
+# persisted docker/plugin-smoke.sh defaults (e.g. C4S_HOST_DIR)
+.env
+.env.local
+
+# symlinks to briefs/patches in the spec repo
+implementer/
+
+# shared skill symlink -> claude4spec-private/skills/brief-implementer-plugin (local-only)
+.claude/skills/c4s-brief-implementer
