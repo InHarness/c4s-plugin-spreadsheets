@@ -41,29 +41,39 @@ interface WriteOpts {
  * payload — a file whose inner slug disagrees with its name must index under the
  * name, or the rebuild would silently fork the sheet in two.
  *
- * Malformed input throws rather than being defaulted into existence: the indexer
- * catches per-entity, warns, and skips that one file. Quietly indexing a sheet
- * named `""` with zero dimensions would look like success and read like data loss.
+ * DEGRADE, DON'T DROP. Throwing here costs the WHOLE sheet: the indexer catches
+ * per-entity, warns, and skips the file, so the sheet disappears from the app
+ * until someone reads the log. That trade is only worth it when the input is
+ * genuinely uninterpretable. An ABSENT field is not — every one of them has an
+ * unambiguous, lossless reading:
+ *
+ *   - no `cells`      → the sheet has no content yet. An empty grid IS the
+ *                       faithful 1:1 reconstruction, not a guess.
+ *   - no `name`       → fall back to the slug; a missing title is a cosmetic
+ *                       defect, and losing 500 cells over it is not a fix.
+ *   - no dimensions   → 0, same as a freshly created sheet.
+ *
+ * What still throws is input that cannot be read as a sheet at all (not an
+ * object) or that CONTRADICTS itself — a `cells` present but not an array is
+ * corruption, and silently discarding it really would hide data loss.
  */
 function toSnapshot(slug: string, input: unknown): SpreadsheetSnapshot {
-  if (!input || typeof input !== 'object') {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw new Error(`spreadsheet '${slug}': snapshot is not an object`);
   }
   const s = input as Partial<SpreadsheetSnapshot>;
-  if (typeof s.name !== 'string') {
-    throw new Error(`spreadsheet '${slug}': snapshot has no string 'name'`);
+  if (s.cells != null && !Array.isArray(s.cells)) {
+    throw new Error(`spreadsheet '${slug}': 'cells' is present but not an array`);
   }
-  if (!Array.isArray(s.cells)) {
-    throw new Error(`spreadsheet '${slug}': snapshot has no 'cells' array`);
-  }
+  const rows = s.cells ?? [];
   return {
     slug,
-    name: s.name,
+    name: typeof s.name === 'string' && s.name.trim() ? s.name : slug,
     nRows: Number(s.nRows ?? 0) || 0,
     nCols: Number(s.nCols ?? 0) || 0,
     headerRow: s.headerRow === true,
     headerCol: s.headerCol === true,
-    cells: s.cells.map((row) => (Array.isArray(row) ? row.map((v) => String(v ?? '')) : [])),
+    cells: rows.map((row) => (Array.isArray(row) ? row.map((v) => String(v ?? '')) : [])),
   };
 }
 
