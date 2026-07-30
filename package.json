@@ -24,6 +24,7 @@
   "scripts": {
     "build": "vite build && node scripts/bundle-backend-deps.mjs",
     "dev": "vite build --watch",
+    "link:host": "node scripts/link-into-host.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
