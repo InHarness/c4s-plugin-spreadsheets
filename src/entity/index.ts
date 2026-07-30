@@ -7,6 +7,8 @@
  *  - `systemPrompt` (required) — overview-first discipline for the agent.
  *  - `backend`:
  *      - `migrations` (L1) — the two index tables.
+ *      - `auxTables` — `spreadsheet_cell`, so the host clears the derived cell
+ *        index on a rebuild along with the metadata table.
  *      - `service` — ONE `SpreadsheetCrudAdapter` per `ProjectContext`; the SAME
  *        instance backs DI, the generic `entity-tools` CRUD (via `crud`), the read
  *        `routes` factory, and the custom `mcpServer` factory.
@@ -27,6 +29,7 @@ import type { EntityContribution, MountContext } from '@c4s/plugin-runtime';
 import {
   SPREADSHEET_TYPE,
   SPREADSHEET_TABLE,
+  SPREADSHEET_CELL_TABLE,
   SPREADSHEET_LABEL,
   SPREADSHEET_LABEL_PLURAL,
   SPREADSHEET_DISPLAY_ORDER,
@@ -70,6 +73,12 @@ export const spreadsheetEntity: EntityContribution = {
   backend: {
     // L1 — forward-only idempotent migrations for the two index tables.
     migrations: spreadsheetMigrations,
+
+    // The sparse cell index is DERIVED from the entity files, so an index
+    // rebuild must clear it before repopulating — otherwise stale cell rows
+    // survive the wipe and merge into freshly restored sheets (a shrunk or
+    // renamed sheet would resurrect cells that no file mentions).
+    auxTables: [SPREADSHEET_CELL_TABLE],
 
     // L2 — one instance per ProjectContext; wraps the rich SpreadsheetService.
     service: (ctx: MountContext) =>

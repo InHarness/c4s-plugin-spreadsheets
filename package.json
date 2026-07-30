@@ -1,6 +1,6 @@
 {
   "name": "c4s-plugin-spreadsheets",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "claude4spec plugin (host API 1.0.0) contributing a hidden `spreadsheet` entity type — a named rows×columns grid of string cells, embedded via <spreadsheet/> and read overview-first (dimensions cheap, cell content fetched in ranges).",
   "type": "module",
   "exports": {

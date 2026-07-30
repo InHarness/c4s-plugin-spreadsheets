@@ -4,6 +4,14 @@
  * and `spreadsheet_cell` (a SPARSE cell index — a row exists only for a non-empty
  * cell; `""` is never stored).
  *
+ * The index is DERIVED. The source of truth is the entity file
+ * `.claude4spec/entities/spreadsheet/<slug>.json`, and NO host path writes it for
+ * a plugin-contributed type (the host's own persist is gated on `isRawEntityType`,
+ * which is false here) — so this service persists its own files. Every committed
+ * mutation calls `entityStore.persist`, and `remove` unlinks. Without that, the
+ * next `indexAll()` — boot, config change, git checkout, plugin hot-reload — clears
+ * the tables and rebuilds them from files that do not exist, destroying every sheet.
+ *
  * Overview-first: `overview()` is a metadata-only read (cheap) and is the entry
  * point; cell content is read by ranges. The dense grid (`getBySlug` / `snapshot`)
  * is materialized only for full-sheet operations (serializer resolution, snapshot,
@@ -36,6 +44,7 @@ import type {
   UpdateSpreadsheetRequest,
 } from '../dto';
 import { buildOverview } from '../overview';
+import { cellKey, cellMapOf, densify, type SparseCell } from '../cells';
 
 type Actor = 'user' | 'agent';
 
@@ -49,14 +58,6 @@ interface SpreadsheetRow {
   n_cols: number;
   header_row: number;
   header_col: number;
-}
-
-/** A row of the sparse `spreadsheet_cell` index. */
-interface CellRow {
-  slug: string;
-  r: number;
-  c: number;
-  value: string;
 }
 
 export interface SpreadsheetListQuery {
@@ -75,13 +76,46 @@ function toOverview(row: SpreadsheetRow): SpreadsheetOverviewDto {
   };
 }
 
-const cellKey = (r: number, c: number): string => `${r}:${c}`;
-
 export class SpreadsheetService {
   constructor(
     private readonly db: MountContext['db'],
     private readonly ctx: MountContext,
   ) {}
+
+  // ── File persistence (the source of truth) ──────────────────────────────
+
+  /**
+   * Write `<entities>/spreadsheet/<slug>.json` from the CURRENT index row. Call
+   * AFTER the mutation's transaction has committed — `entityStore.persist` reads
+   * the row back through the host reader and runs it through the L9 `snapshot`
+   * projection, so an uncommitted row would serialize stale (or not at all).
+   *
+   * Optional-chained: a host build without an `entityStore` on the mount context
+   * (or a test double) degrades to in-memory-only rather than throwing. A REAL
+   * failure to write does throw — losing the file silently is the bug this whole
+   * change exists to fix.
+   *
+   * Public because `SpreadsheetCrudAdapter.upsert` calls it on the one path where
+   * the host does NOT pass `writeFile: false`.
+   */
+  persist(slug: string): void {
+    try {
+      this.ctx.entityStore?.persist?.(SPREADSHEET_TYPE, slug);
+    } catch (err) {
+      console.error(`[spreadsheet] persist failed for ${slug}:`, err);
+      throw err;
+    }
+  }
+
+  /** Unlink the entity file (delete, and the OLD slug of a rename). */
+  private removeFile(slug: string): void {
+    try {
+      this.ctx.entityStore?.remove?.(SPREADSHEET_TYPE, slug);
+    } catch (err) {
+      console.error(`[spreadsheet] entity file removal failed for ${slug}:`, err);
+      throw err;
+    }
+  }
 
   // ── Metadata reads ──────────────────────────────────────────────────────
 
@@ -127,20 +161,26 @@ export class SpreadsheetService {
 
   // ── Cell reads ──────────────────────────────────────────────────────────
 
-  /** Map of "r:c" → value for cells inside a 1-based inclusive rectangle. */
-  private cellMap(slug: string, r1: number, c1: number, r2: number, c2: number): Map<string, string> {
-    const rows = this.db
+  /** Sparse rows inside a 1-based inclusive rectangle. */
+  private cellRows(slug: string, r1: number, c1: number, r2: number, c2: number): SparseCell[] {
+    return this.db
       .prepare(
         `SELECT r, c, value FROM ${SPREADSHEET_CELL_TABLE}
           WHERE slug = ? AND r BETWEEN ? AND ? AND c BETWEEN ? AND ?`,
       )
-      .all(slug, r1, r2, c1, c2) as Array<Pick<CellRow, 'r' | 'c' | 'value'>>;
-    const map = new Map<string, string>();
-    for (const cell of rows) map.set(cellKey(cell.r, cell.c), cell.value);
-    return map;
+      .all(slug, r1, r2, c1, c2) as SparseCell[];
   }
 
-  /** Materialize a dense window (empties as `""`) for a 1-based inclusive range. */
+  /** Map of "r:c" → value for cells inside a 1-based inclusive rectangle. */
+  private cellMap(slug: string, r1: number, c1: number, r2: number, c2: number): Map<string, string> {
+    return cellMapOf(this.cellRows(slug, r1, c1, r2, c2));
+  }
+
+  /**
+   * Materialize a dense window (empties as `""`) for a 1-based inclusive range,
+   * via the shared `densify` helper the L9 serializer also uses — the two must
+   * not drift (`ac-snapshot-zwraca-pelny-deterministyczn`).
+   */
   private denseWindow(
     slug: string,
     r1: number,
@@ -148,14 +188,7 @@ export class SpreadsheetService {
     r2: number,
     c2: number,
   ): string[][] {
-    const map = this.cellMap(slug, r1, c1, r2, c2);
-    const cells: string[][] = [];
-    for (let r = r1; r <= r2; r++) {
-      const rowArr: string[] = [];
-      for (let c = c1; c <= c2; c++) rowArr.push(map.get(cellKey(r, c)) ?? '');
-      cells.push(rowArr);
-    }
-    return cells;
+    return densify(this.cellRows(slug, r1, c1, r2, c2), r1, c1, r2, c2);
   }
 
   /**
@@ -245,6 +278,7 @@ export class SpreadsheetService {
       return slug;
     });
     const slug = apply();
+    this.persist(slug);
     this.broadcast(slug);
     return this.getBySlug(slug)!;
   }
@@ -290,9 +324,13 @@ export class SpreadsheetService {
     apply();
 
     if (renaming && targetSlug !== slug) {
+      // Exactly one file must survive a rename: drop the old slug's file before
+      // writing the new one, or the rebuild would resurrect the old sheet.
+      this.removeFile(slug);
       this.ctx.referencesService?.repoint?.(SPREADSHEET_TYPE, slug, targetSlug);
       this.broadcast(slug);
     }
+    this.persist(targetSlug);
     this.broadcast(targetSlug);
     this.captureVersion(targetSlug, 'update', actor, 'Updated');
     return { snapshot: this.getBySlug(targetSlug)!, previousSlug: slug };
@@ -304,10 +342,14 @@ export class SpreadsheetService {
    */
   setCell(slug: string, r: number, c: number, value: string): void {
     this.writeCell(slug, r, c, value);
+    this.persist(slug);
     this.broadcast(slug);
   }
 
-  /** Same semantics as `setCell` but without broadcasting (batch helper). */
+  /**
+   * Same semantics as `setCell` but without broadcasting OR persisting (batch
+   * helper) — `setRange` writes the file ONCE after the whole block commits.
+   */
   private writeCell(slug: string, r: number, c: number, value: string): void {
     if (value === '') {
       this.db
@@ -336,6 +378,7 @@ export class SpreadsheetService {
       }
     });
     apply();
+    this.persist(slug);
     this.broadcast(slug);
   }
 
@@ -351,6 +394,7 @@ export class SpreadsheetService {
     this.db
       .prepare(`UPDATE ${SPREADSHEET_TABLE} SET n_rows = ?, n_cols = ? WHERE slug = ?`)
       .run(nRows, nCols, slug);
+    this.persist(slug);
     this.broadcast(slug);
     this.captureVersion(slug, 'update', actor, 'Resized');
     return this.overview(slug);
@@ -365,7 +409,7 @@ export class SpreadsheetService {
     const apply = this.db.transaction(() => {
       const rows = this.db
         .prepare(`SELECT r, c, value FROM ${SPREADSHEET_CELL_TABLE} WHERE slug = ?`)
-        .all(slug) as Array<Pick<CellRow, 'r' | 'c' | 'value'>>;
+        .all(slug) as SparseCell[];
       this.db.prepare(`DELETE FROM ${SPREADSHEET_CELL_TABLE} WHERE slug = ?`).run(slug);
       const insert = this.db.prepare(
         `INSERT INTO ${SPREADSHEET_CELL_TABLE} (slug, r, c, value) VALUES (?, ?, ?, ?)`,
@@ -384,6 +428,7 @@ export class SpreadsheetService {
     if (!meta) return;
     this.reindexCells(slug, (r, c) => ({ r: r >= at ? r + 1 : r, c }));
     this.db.prepare(`UPDATE ${SPREADSHEET_TABLE} SET n_rows = n_rows + 1 WHERE slug = ?`).run(slug);
+    this.persist(slug);
     this.broadcast(slug);
     this.captureVersion(slug, 'update', actor, 'Inserted row');
   }
@@ -396,6 +441,7 @@ export class SpreadsheetService {
     this.db
       .prepare(`UPDATE ${SPREADSHEET_TABLE} SET n_rows = MAX(0, n_rows - 1) WHERE slug = ?`)
       .run(slug);
+    this.persist(slug);
     this.broadcast(slug);
     this.captureVersion(slug, 'update', actor, 'Deleted row');
   }
@@ -406,6 +452,7 @@ export class SpreadsheetService {
     if (!meta) return;
     this.reindexCells(slug, (r, c) => ({ r, c: c >= at ? c + 1 : c }));
     this.db.prepare(`UPDATE ${SPREADSHEET_TABLE} SET n_cols = n_cols + 1 WHERE slug = ?`).run(slug);
+    this.persist(slug);
     this.broadcast(slug);
     this.captureVersion(slug, 'update', actor, 'Inserted column');
   }
@@ -418,6 +465,7 @@ export class SpreadsheetService {
     this.db
       .prepare(`UPDATE ${SPREADSHEET_TABLE} SET n_cols = MAX(0, n_cols - 1) WHERE slug = ?`)
       .run(slug);
+    this.persist(slug);
     this.broadcast(slug);
     this.captureVersion(slug, 'update', actor, 'Deleted column');
   }
@@ -435,7 +483,10 @@ export class SpreadsheetService {
     });
     const info = apply();
     const deleted = info.changes > 0;
-    if (deleted) this.broadcast(slug);
+    if (deleted) {
+      this.removeFile(slug);
+      this.broadcast(slug);
+    }
     return { deleted, danglingRefs };
   }
 
@@ -466,6 +517,12 @@ export class SpreadsheetService {
    * sparse cell index (delete-all then insert non-`""` cells). Repeating with the
    * same snapshot yields the same state regardless of the starting point
    * (`ac-restore-jest-idempotentnym-upsert`); `""` never creates a row.
+   *
+   * Deliberately does NOT persist a file. This is the INDEX side of the restore
+   * path: the snapshot arrived FROM a file (an `indexAll()` rebuild) or from a
+   * release, and the host signals that by passing `writeFile: false` — writing
+   * here would re-derive the file from the row it is in the middle of building.
+   * `SpreadsheetCrudAdapter.upsert` is the one that honours the flag.
    */
   restore(snapshot: SpreadsheetSnapshot): { op: 'created' | 'updated' } {
     const before = this.metaRow(snapshot.slug);
